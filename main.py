@@ -1,3 +1,4 @@
+import streamlit as st
 import requests
 import json
 import time
@@ -6,7 +7,7 @@ from datetime import datetime
 import logging
 
 class GitHubTracker:
-    """A class to track GitHub followers and unfollowers."""
+    """A class to track GitHub followers, unfollowers, and non-mutual following."""
     
     def __init__(self, username, token=None):
         """Initialize the tracker with a GitHub username and optional token.
@@ -30,7 +31,7 @@ class GitHubTracker:
         
         # Set up logging
         logging.basicConfig(level=logging.INFO, filename=f"{username}_tracker.log",
-                          format="%(asctime)s - %(levelname)s - %(message)s")
+                            format="%(asctime)s - %(levelname)s - %(message)s")
         
         self.initializeDataFiles()
     
@@ -72,10 +73,13 @@ class GitHubTracker:
             if response.status_code != 200:
                 if response.status_code == 403:
                     logging.error("Rate limit exceeded. Try using a token or waiting.")
+                    st.error("Rate limit exceeded. Try using a token or waiting.")
                 elif response.status_code == 401:
                     logging.error("Invalid token. Please check your GitHub token.")
+                    st.error("Invalid token. Please check your GitHub token.")
                 else:
                     logging.error(f"Error getting followers: {response.status_code} - {response.text}")
+                    st.error(f"Error getting followers: {response.status_code}")
                 return []
             
             pageFollowers = response.json()
@@ -94,6 +98,65 @@ class GitHubTracker:
         
         logging.info(f"Fetched {len(followers)} followers for {self.username}")
         return followers
+    
+    def getFollowing(self):
+        """Fetch all users the target user is following.
+        
+        Returns:
+            list: List of following user dictionaries with login, id, avatar_url, and html_url.
+        """
+        following = []
+        page = 1
+        
+        while True:
+            url = f"https://api.github.com/users/{self.username}/following?page={page}&per_page=100"
+            response = requests.get(url, headers=self.headers)
+            
+            self.check_rate_limit(response)
+            
+            if response.status_code != 200:
+                if response.status_code == 403:
+                    logging.error("Rate limit exceeded. Try using a token or waiting.")
+                    st.error("Rate limit exceeded. Try using a token or waiting.")
+                elif response.status_code == 401:
+                    logging.error("Invalid token. Please check your GitHub token.")
+                    st.error("Invalid token. Please check your GitHub token.")
+                else:
+                    logging.error(f"Error getting following: {response.status_code} - {response.text}")
+                    st.error(f"Error getting following: {response.status_code}")
+                return []
+            
+            pageFollowing = response.json()
+            if not pageFollowing:
+                break
+                
+            following.extend([{
+                'login': user['login'],
+                'id': user['id'],
+                'avatarUrl': user['avatar_url'],
+                'htmlUrl': user['html_url']
+            } for user in pageFollowing])
+            
+            page += 1
+            time.sleep(1)
+        
+        logging.info(f"Fetched {len(following)} following for {self.username}")
+        return following
+    
+    def getNonMutualFollowing(self):
+        """Find users that the target user follows but who don't follow back.
+        
+        Returns:
+            list: List of non-mutual following users.
+        """
+        followers = self.getFollowers()
+        following = self.getFollowing()
+        
+        follower_usernames = set(user['login'] for user in followers)
+        non_mutual = [user for user in following if user['login'] not in follower_usernames]
+        
+        logging.info(f"Found {len(non_mutual)} non-mutual following for {self.username}")
+        return non_mutual
     
     def saveCurrentFollowers(self, followers):
         """Save current followers to file."""
@@ -146,8 +209,8 @@ class GitHubTracker:
         currentFollowers = self.getFollowers()
         previousFollowers = self.loadPreviousFollowers()
         
-        currentUsernames = [user['login'] for user in currentFollowers]
-        previousUsernames = [user['login'] for user in previousFollowers]
+        currentUsernames = set(user['login'] for user in currentFollowers)
+        previousUsernames = set(user['login'] for user in previousFollowers)
         
         newFollowers = [user for user in currentFollowers if user['login'] not in previousUsernames]
         unfollowers = [user for user in previousFollowers if user['login'] not in currentUsernames]
@@ -192,55 +255,122 @@ class GitHubTracker:
                 "recentUnfollowers": []
             }
 
-if __name__ == "__main__":
-    import argparse
+def main():
+    st.title("GitHub Follower Tracker")
     
-    parser = argparse.ArgumentParser(description='Track GitHub followers/unfollowers')
-    parser.add_argument('username', help='Your GitHub username')
-    parser.add_argument('--token', help='GitHub token for higher API limits')
-    parser.add_argument('--check', action='store_true', help='Check who followed/unfollowed')
-    parser.add_argument('--stats', action='store_true', help='Show your follower stats')
+    # Initialize session state
+    if 'tracker' not in st.session_state:
+        st.session_state.tracker = None
+        st.session_state.view = 'input'
+
+    # Input form
+    if st.session_state.view == 'input':
+        st.subheader("Enter GitHub Details")
+        username = st.text_input("GitHub Username", key="username")
+        token = st.text_input("GitHub Token (optional)", type="password", key="token")
+        
+        if st.button("Start Tracking"):
+            if not username.strip():
+                st.error("Please enter a valid GitHub username")
+                return
+            if token and len(token) < 40:
+                st.error("Token seems invalid. Please check or leave it empty.")
+                return
+            try:
+                st.session_state.tracker = GitHubTracker(username, token)
+                st.session_state.view = 'menu'
+                st.rerun()
+            except ValueError as e:
+                st.error(f"Error: {e}")
     
-    args = parser.parse_args()
+    # Main menu
+    elif st.session_state.view == 'menu':
+        st.subheader(f"Welcome, {st.session_state.tracker.username}")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("Check New Followers/Unfollowers"):
+                st.session_state.view = 'changes'
+                st.rerun()
+        with col2:
+            if st.button("View Stats"):
+                st.session_state.view = 'stats'
+                st.rerun()
+        with col3:
+            if st.button("View Non-Mutual Following"):
+                st.session_state.view = 'nonMutual'
+                st.rerun()
+        
+        if st.button("Change User"):
+            st.session_state.tracker = None
+            st.session_state.view = 'input'
+            st.rerun()
     
-    tracker = GitHubTracker(args.username, args.token)
-    
-    if args.check:
-        print("Looking for changes...")
-        changes = tracker.checkChanges()
+    # Changes view
+    elif st.session_state.view == 'changes':
+        st.subheader("Follower Changes")
+        with st.spinner("Checking for changes..."):
+            changes = st.session_state.tracker.checkChanges()
         
         if changes["newFollowers"]:
-            print(f"\n🎉 New Followers ({len(changes['newFollowers'])}):")
+            st.markdown(f"### 🎉 New Followers ({len(changes['newFollowers'])})")
             for follower in changes["newFollowers"]:
-                print(f"  • {follower['login']} - {follower['htmlUrl']}")
+                st.markdown(f"- [{follower['login']}]({follower['htmlUrl']})")
         else:
-            print("\nNo new followers this time.")
-            
-        if changes["unfollowers"]:
-            print(f"\n👋 Unfollowers ({len(changes['unfollowers'])}):")
-            for unfollower in changes["unfollowers"]:
-                print(f"  • {unfollower['login']} - {unfollower['htmlUrl']}")
-        else:
-            print("\nNobody unfollowed you. Nice!")
-            
-        print(f"\nYou have {changes['totalFollowers']} total followers")
+            st.write("No new followers this time.")
         
-    elif args.stats:
-        stats = tracker.getStats()
-        print(f"\n📊 Follower Stats for {args.username}:")
-        print(f"  • Total Followers: {stats['totalFollowers']}")
-        print(f"  • New Followers Ever: {stats['totalNewFollowers']}")
-        print(f"  • Unfollowers Ever: {stats['totalUnfollowers']}")
+        if changes["unfollowers"]:
+            st.markdown(f"### 👋 Unfollowers ({len(changes['unfollowers'])})")
+            for unfollower in changes["unfollowers"]:
+                st.markdown(f"- [{unfollower['login']}]({unfollower['htmlUrl']})")
+        else:
+            st.write("Nobody unfollowed you. Nice!")
+        
+        st.write(f"**Total Followers:** {changes['totalFollowers']}")
+        
+        if st.button("Back to Menu"):
+            st.session_state.view = 'menu'
+            st.rerun()
+    
+    # Stats view
+    elif st.session_state.view == 'stats':
+        st.subheader(f"Follower Stats for {st.session_state.tracker.username}")
+        stats = st.session_state.tracker.getStats()
+        
+        st.write(f"**Total Followers:** {stats['totalFollowers']}")
+        st.write(f"**New Followers Ever:** {stats['totalNewFollowers']}")
+        st.write(f"**Unfollowers Ever:** {stats['totalUnfollowers']}")
         
         if stats['recentNewFollowers']:
-            print("\n🆕 Recent New Followers:")
+            st.markdown("### 🆕 Recent New Followers")
             for follower in stats['recentNewFollowers']:
-                print(f"  • {follower['user']['login']} - {follower['timestamp']}")
-                
+                st.markdown(f"- [{follower['user']['login']}]({follower['user']['htmlUrl']}) - {follower['timestamp']}")
+        
         if stats['recentUnfollowers']:
-            print("\n🔄 Recent Unfollowers:")
+            st.markdown("### 🔄 Recent Unfollowers")
             for unfollower in stats['recentUnfollowers']:
-                print(f"  • {unfollower['user']['login']} - {unfollower['timestamp']}")
-    else:
-        print("Hey! You need to use --check or --stats")
-        print("Example: python script.py yourname --check")
+                st.markdown(f"- [{unfollower['user']['login']}]({unfollower['user']['htmlUrl']}) - {unfollower['timestamp']}")
+        
+        if st.button("Back to Menu"):
+            st.session_state.view = 'menu'
+            st.rerun()
+    
+    # Non-mutual view
+    elif st.session_state.view == 'nonMutual':
+        st.subheader("Non-Mutual Following")
+        with st.spinner("Checking non-mutual following..."):
+            non_mutual = st.session_state.tracker.getNonMutualFollowing()
+        
+        if non_mutual:
+            st.markdown(f"### 👤 Users you follow but who don’t follow you back ({len(non_mutual)})")
+            for user in non_mutual:
+                st.markdown(f"- [{user['login']}]({user['htmlUrl']})")
+        else:
+            st.write("All users you follow also follow you back!")
+        
+        if st.button("Back to Menu"):
+            st.session_state.view = 'menu'
+            st.rerun()
+
+if __name__ == "__main__":
+    main()
